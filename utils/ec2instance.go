@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2_types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -34,7 +35,8 @@ var (
 func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error) {
 
 	once.Do(func() {
-		cfg, err := config.LoadDefaultConfig(ctx)
+		defCfg, err := config.LoadDefaultConfig(ctx, config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
+		log.Printf("defCfg.Region: %v", defCfg.Region)
 
 		if err != nil {
 			log.Fatalf("Failed to load default aws config: %v", err)
@@ -42,19 +44,25 @@ func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error)
 
 		log.Println("loaded context")
 
-		err = description.retrieveIdentity(ctx, &cfg)
+		err = description.retrieveIdentity(ctx, &defCfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve region from ec2 imds: %v", err)
 		}
 
-		err = description.retrieveTags(ctx, &cfg)
+		regCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(description.Region))
+
+		if err != nil {
+			log.Fatalf("Failed to get regional config: %v", err)
+		}
+
+		err = description.retrieveTags(ctx, &regCfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve tags from ec2: %v", err)
 		}
 
-		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(cfg))
+		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(regCfg))
 	})
 
 	req, err := stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
@@ -63,7 +71,6 @@ func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error)
 		return EC2InstanceAuthenticator{}, err
 	}
 
-	stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	return EC2InstanceAuthenticator{
 		EC2InstanceDescription: description,
 		PresignedHTTPRequest:   *req,
