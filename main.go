@@ -19,7 +19,7 @@ var (
 )
 
 func invoke(presigned *v4.PresignedHTTPRequest) string {
-	req := http.Request{
+	req := &http.Request{
 		Method: presigned.Method,
 		URL: func() *url.URL {
 			parse, err := url.Parse(presigned.URL)
