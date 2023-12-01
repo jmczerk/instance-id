@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"time"
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/jmczerk/instance-id/utils"
@@ -58,5 +59,11 @@ func main() {
 		log.Fatalf("AuthenticateInstance failed: %v", err)
 	}
 
+	log.Println(invoke(auth))
+	time.Sleep(10 * time.Second)
+	log.Println(invoke(auth))
+	time.Sleep(10 * time.Second)
+	log.Println(invoke(auth))
+	time.Sleep(10 * time.Second)
 	log.Println(invoke(auth))
 }
