@@ -22,11 +22,5 @@ func main() {
 		log.Fatalf("AuthenticateInstance failed: %v", err)
 	}
 
-	token, err := utils.MarshalAndEncode(&auth)
-
-	if err != nil {
-		log.Fatalf("MarshalAndEncode failed: %v", err)
-	}
-
-	log.Println(token)
+	log.Println(auth)
 }

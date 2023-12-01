@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2_types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type EC2InstanceDescription struct {
@@ -22,30 +24,27 @@ type EC2InstanceDescription struct {
 	Tags       map[string]string
 }
 
-type EC2InstanceAuthenticator struct {
-	EC2InstanceDescription
-	v4.PresignedHTTPRequest
-}
-
 var (
 	stsPresignClient sts.PresignClient
-	description      EC2InstanceDescription
+	encDesc          string
 	once             sync.Once
 )
 
-func MarshalAndEncode(auth *EC2InstanceAuthenticator) (string, error) {
-	json, err := json.Marshal(*auth)
+func (desc *EC2InstanceDescription) MarshalAndEncode() (string, error) {
+	json, err := json.Marshal(*desc)
 
 	if err != nil {
 		return "", err
 	}
 
-	return string(json), nil
+	return base64.StdEncoding.EncodeToString(json), nil
 }
 
-func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error) {
+func AuthenticateInstance(ctx context.Context) (*v4.PresignedHTTPRequest, error) {
 
 	once.Do(func() {
+		desc := &EC2InstanceDescription{}
+
 		cfg, err := config.LoadDefaultConfig(ctx,
 			config.WithEC2IMDSRegion(),
 			config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
@@ -56,31 +55,34 @@ func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error)
 
 		log.Println("loaded context")
 
-		err = description.retrieveIdentity(ctx, &cfg)
+		err = desc.retrieveIdentity(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve region from ec2 imds: %v", err)
 		}
 
-		err = description.retrieveTags(ctx, &cfg)
+		err = desc.retrieveTags(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve tags from ec2: %v", err)
 		}
 
+		encDesc, err = desc.MarshalAndEncode()
+
+		if err != nil {
+			log.Fatalf("Failed to marshal instance descritpion: %v", err)
+		}
+
+		log.Printf("Encoded description: %v", encDesc)
+
 		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(cfg))
 	})
 
-	req, err := stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-
-	if err != nil {
-		return EC2InstanceAuthenticator{}, err
-	}
-
-	return EC2InstanceAuthenticator{
-		EC2InstanceDescription: description,
-		PresignedHTTPRequest:   *req,
-	}, nil
+	return stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}, func(opt *sts.PresignOptions) {
+		opt.ClientOptions = append(opt.ClientOptions, func(o *sts.Options) {
+			o.APIOptions = append(o.APIOptions, smithyhttp.AddHeaderValue("X-Inverting-Proxy-EC2-VM-Desc", encDesc))
+		})
+	})
 }
 
 func (desc *EC2InstanceDescription) retrieveIdentity(ctx context.Context, cfg *aws.Config) error {
