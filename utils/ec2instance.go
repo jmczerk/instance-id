@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"net/http"
+	"net/url"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
@@ -24,75 +26,175 @@ type EC2InstanceDescription struct {
 	Tags       map[string]string
 }
 
-var (
-	stsPresignClient sts.PresignClient
-	encDesc          string
-	once             sync.Once
-)
+type EC2InstanceIdentity struct {
+	Description EC2InstanceDescription
+	Expiration  time.Time
+}
 
-func MarshalAndEncode(v any) (string, error) {
-	jv, err := json.Marshal(v)
+type PresignedEC2InstanceIdentityRequest struct {
+	URL          url.URL
+	Method       string
+	SignedHeader http.Header
+}
+
+func (r *PresignedEC2InstanceIdentityRequest) MarshalAndEncode() (string, error) {
+	j, err := json.Marshal(r)
 
 	if err != nil {
 		return "", err
 	}
 
-	return base64.StdEncoding.EncodeToString(jv), nil
+	return base64.URLEncoding.EncodeToString(j), nil
 }
 
-func DecodeAndUnmarshal(enc string, v any) error {
-	jsonDesc, err := base64.StdEncoding.DecodeString(enc)
+func DecodeAndUnmarshal(enc string) (*PresignedEC2InstanceIdentityRequest, error) {
+	j, err := base64.URLEncoding.DecodeString(enc)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return json.Unmarshal(jsonDesc, v)
+	req := &PresignedEC2InstanceIdentityRequest{}
+
+	err = json.Unmarshal(j, req)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
-func AuthenticateInstance(ctx context.Context) (*v4.PresignedHTTPRequest, error) {
+// ec2InstanceDescriptionSingleton is a singleton wrapper around EC2InstanceDescription.
+type ec2InstanceDescriptionSingleton struct {
+	description EC2InstanceDescription
+	once        sync.Once
+}
 
-	once.Do(func() {
-		desc := &EC2InstanceDescription{}
+// stsPresignClientSingleton is a singleton wrapper around sts.PresignClient.
+type stsPresignClientSingleton struct {
+	client sts.PresignClient
+	once   sync.Once
+}
 
-		cfg, err := config.LoadDefaultConfig(ctx,
-			config.WithEC2IMDSRegion(),
-			config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
+type cachedIdentity struct {
+	instanceIdentity        EC2InstanceIdentity
+	encodedInstanceIdentity string
+	mutex                   sync.Mutex
+}
 
-		if err != nil {
-			log.Fatalf("Failed to load default aws config: %v", err)
-		}
+var (
+	// description is a singleton EC2InstanceDescription.  This allows us to interogate EC2
+	// Instance Metadata Service (IMDS) once at process startup, as these are static values
+	description ec2InstanceDescriptionSingleton
 
-		log.Println("loaded context")
+	// stsPresignClient is a singleton sts.PresignClient instance.  This allows us to to set up a
+	// long-lived client with an aws.CredentialsCache object which will take care of concurrency-
+	// safe caching and retrieval of credentials.
+	stsPresignClient stsPresignClientSingleton
 
-		err = desc.retrieveIdentity(ctx, &cfg)
+	cachedId cachedIdentity
+)
+
+func AuthenticateInstance(ctx context.Context) (*PresignedEC2InstanceIdentityRequest, error) {
+
+	encDesc, err := cachedId.getOrRefreshEncodedIdentity()
+
+	if err != nil {
+		return nil, err
+	}
+
+	awsReq, err := stsPresignClient.getClient(ctx).PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}, func(opt *sts.PresignOptions) {
+		opt.ClientOptions = append(opt.ClientOptions, func(opt *sts.Options) {
+			opt.APIOptions = append(opt.APIOptions, smithyhttp.AddHeaderValue("X-Inverting-Proxy-EC2-VM-Desc", encDesc))
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	url, err := url.Parse(awsReq.URL)
+
+	if err != nil {
+		return nil, err
+	}
+
+	req := &PresignedEC2InstanceIdentityRequest{
+		Method:       awsReq.Method,
+		URL:          *url,
+		SignedHeader: awsReq.SignedHeader,
+	}
+
+	return req, nil
+}
+
+func (d *ec2InstanceDescriptionSingleton) getDescription(ctx context.Context) *EC2InstanceDescription {
+	d.once.Do(func() {
+		cfg := loadConfig(ctx)
+		err := d.description.retrieveIdentity(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve region from ec2 imds: %v", err)
 		}
 
-		err = desc.retrieveTags(ctx, &cfg)
+		err = d.description.retrieveTags(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve tags from ec2: %v", err)
 		}
+	})
 
-		encDesc, err = MarshalAndEncode(desc)
+	return &d.description
+}
+
+func (c *stsPresignClientSingleton) getClient(ctx context.Context) *sts.PresignClient {
+	c.once.Do(func() {
+		cfg := loadConfig(ctx)
+		c.client = *sts.NewPresignClient(sts.NewFromConfig(cfg))
+	})
+
+	return &c.client
+}
+
+func loadConfig(ctx context.Context) aws.Config {
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithEC2IMDSRegion(),
+		config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
+
+	if err != nil {
+		log.Fatalf("Failed to load default aws config: %v", err)
+	}
+
+	return cfg
+}
+
+func (id *cachedIdentity) getOrRefreshEncodedIdentity() (string, error) {
+
+	// Get system clock time before taking the lock
+	now := time.Now()
+	adj := now.Add(time.Second * 120)
+
+	id.mutex.Lock()
+	defer id.mutex.Unlock()
+
+	if adj.After(id.instanceIdentity.Expiration) {
+
+		// This is expected to be the signicifantly less frequent path, as expiration window is
+		// expected to be on the order of minutes.  Thus the intentional choice to do the marshal
+		// and encode under lock, so that we can avoid these cycles in the common case.
+
+		id.instanceIdentity.Expiration = now.Add(time.Minute * 15)
+		j, err := json.Marshal(id.instanceIdentity)
 
 		if err != nil {
-			log.Fatalf("Failed to marshal instance descritpion: %v", err)
+			return "", err
 		}
 
-		log.Printf("Encoded description: %v", encDesc)
+		id.encodedInstanceIdentity = base64.URLEncoding.EncodeToString(j)
+	}
 
-		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(cfg))
-	})
-
-	return stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}, func(opt *sts.PresignOptions) {
-		opt.ClientOptions = append(opt.ClientOptions, func(o *sts.Options) {
-			o.APIOptions = append(o.APIOptions, smithyhttp.AddHeaderValue("X-Inverting-Proxy-EC2-VM-Desc", encDesc))
-		})
-	})
+	return id.encodedInstanceIdentity, nil
 }
 
 func (desc *EC2InstanceDescription) retrieveIdentity(ctx context.Context, cfg *aws.Config) error {

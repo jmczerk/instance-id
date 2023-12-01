@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
+	"net/http"
 
 	"github.com/jmczerk/instance-id/utils"
 )
@@ -22,5 +24,37 @@ func main() {
 		log.Fatalf("AuthenticateInstance failed: %v", err)
 	}
 
-	log.Println(utils.MarshalAndEncode(auth))
+	enc, err := auth.MarshalAndEncode()
+
+	if err != nil {
+		log.Fatalf("Encoding req failed: %v", err)
+	}
+
+	log.Printf("Encoded request:\n%v", enc)
+
+	dec, err := utils.DecodeAndUnmarshal(enc)
+
+	if err != nil {
+		log.Fatalf("Decoding req failed: %v", err)
+	}
+
+	req := &http.Request{
+		Method: dec.Method,
+		URL:    &dec.URL,
+		Header: dec.SignedHeader,
+	}
+
+	rsp, err := http.DefaultClient.Do(req)
+
+	if err != nil {
+		log.Fatalf("Perf req failed: %v", err)
+	}
+
+	body, err := io.ReadAll(rsp.Body)
+
+	if err != nil {
+		log.Fatalf("Reading body failed: %v", err)
+	}
+
+	log.Println(body)
 }
