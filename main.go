@@ -41,6 +41,12 @@ func invoke(presigned *v4.PresignedHTTPRequest) string {
 		log.Fatalf("Read body failed: %v", err)
 	}
 
+	for key, vals := range rsp.Header {
+		for _, val := range vals {
+			log.Printf("HEADER %v : %v", key, val)
+		}
+	}
+
 	return string(body)
 }
 
