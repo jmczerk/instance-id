@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 
@@ -32,11 +33,22 @@ var (
 	once             sync.Once
 )
 
+func MarshalAndEncode(auth *EC2InstanceAuthenticator) (string, error) {
+	json, err := json.Marshal(*auth)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(json), nil
+}
+
 func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error) {
 
 	once.Do(func() {
-		defCfg, err := config.LoadDefaultConfig(ctx, config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
-		log.Printf("defCfg.Region: %v", defCfg.Region)
+		cfg, err := config.LoadDefaultConfig(ctx,
+			config.WithEC2IMDSRegion(),
+			config.WithEC2RoleCredentialOptions(func(opts *ec2rolecreds.Options) {}))
 
 		if err != nil {
 			log.Fatalf("Failed to load default aws config: %v", err)
@@ -44,25 +56,19 @@ func AuthenticateInstance(ctx context.Context) (EC2InstanceAuthenticator, error)
 
 		log.Println("loaded context")
 
-		err = description.retrieveIdentity(ctx, &defCfg)
+		err = description.retrieveIdentity(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve region from ec2 imds: %v", err)
 		}
 
-		regCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(description.Region))
-
-		if err != nil {
-			log.Fatalf("Failed to get regional config: %v", err)
-		}
-
-		err = description.retrieveTags(ctx, &regCfg)
+		err = description.retrieveTags(ctx, &cfg)
 
 		if err != nil {
 			log.Fatalf("Failed to retrieve tags from ec2: %v", err)
 		}
 
-		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(regCfg))
+		stsPresignClient = *sts.NewPresignClient(sts.NewFromConfig(cfg))
 	})
 
 	req, err := stsPresignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})

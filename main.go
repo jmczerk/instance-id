@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"log"
 
 	"github.com/jmczerk/instance-id/utils"
 )
@@ -15,5 +16,17 @@ var (
 
 func main() {
 	ctx := context.Background()
-	utils.AuthenticateInstance(ctx)
+	auth, err := utils.AuthenticateInstance(ctx)
+
+	if err != nil {
+		log.Fatalf("AuthenticateInstance failed: %v", err)
+	}
+
+	token, err := utils.MarshalAndEncode(&auth)
+
+	if err != nil {
+		log.Fatalf("MarshalAndEncode failed: %v", err)
+	}
+
+	log.Println(token)
 }
