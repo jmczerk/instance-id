@@ -16,6 +16,28 @@ var (
 	sleepTime  = flag.Int("max-sleep-time", 10, "Max time to sleep between iterations")
 )
 
+func do(idr *utils.PresignedEC2InstanceIdentityRequest) {
+	req := &http.Request{
+		Method: idr.Method,
+		URL:    &idr.URL,
+		Header: idr.SignedHeader,
+	}
+
+	rsp, err := http.DefaultClient.Do(req)
+
+	if err != nil {
+		log.Fatalf("Perf req failed: %v", err)
+	}
+
+	body, err := io.ReadAll(rsp.Body)
+
+	if err != nil {
+		log.Fatalf("Reading body failed: %v", err)
+	}
+
+	log.Println(string(body))
+}
+
 func main() {
 	ctx := context.Background()
 	auth, err := utils.AuthenticateInstance(ctx)
@@ -23,6 +45,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("AuthenticateInstance failed: %v", err)
 	}
+
+	do(auth)
 
 	enc, err := auth.MarshalAndEncode()
 
@@ -38,23 +62,5 @@ func main() {
 		log.Fatalf("Decoding req failed: %v", err)
 	}
 
-	req := &http.Request{
-		Method: dec.Method,
-		URL:    &dec.URL,
-		Header: dec.SignedHeader,
-	}
-
-	rsp, err := http.DefaultClient.Do(req)
-
-	if err != nil {
-		log.Fatalf("Perf req failed: %v", err)
-	}
-
-	body, err := io.ReadAll(rsp.Body)
-
-	if err != nil {
-		log.Fatalf("Reading body failed: %v", err)
-	}
-
-	log.Println(body)
+	do(dec)
 }
