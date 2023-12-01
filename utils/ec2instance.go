@@ -30,14 +30,24 @@ var (
 	once             sync.Once
 )
 
-func (desc *EC2InstanceDescription) MarshalAndEncode() (string, error) {
-	json, err := json.Marshal(*desc)
+func MarshalAndEncode(v any) (string, error) {
+	jv, err := json.Marshal(v)
 
 	if err != nil {
 		return "", err
 	}
 
-	return base64.StdEncoding.EncodeToString(json), nil
+	return base64.StdEncoding.EncodeToString(jv), nil
+}
+
+func DecodeAndUnmarshal(enc string, v any) error {
+	jsonDesc, err := base64.StdEncoding.DecodeString(enc)
+
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(jsonDesc, v)
 }
 
 func AuthenticateInstance(ctx context.Context) (*v4.PresignedHTTPRequest, error) {
@@ -67,7 +77,7 @@ func AuthenticateInstance(ctx context.Context) (*v4.PresignedHTTPRequest, error)
 			log.Fatalf("Failed to retrieve tags from ec2: %v", err)
 		}
 
-		encDesc, err = desc.MarshalAndEncode()
+		encDesc, err = MarshalAndEncode(desc)
 
 		if err != nil {
 			log.Fatalf("Failed to marshal instance descritpion: %v", err)
