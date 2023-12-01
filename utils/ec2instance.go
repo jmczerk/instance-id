@@ -98,7 +98,7 @@ var (
 
 func AuthenticateInstance(ctx context.Context) (*PresignedEC2InstanceIdentityRequest, error) {
 
-	encDesc, err := cachedId.getOrRefreshEncodedIdentity()
+	encDesc, err := cachedId.getOrRefreshEncodedIdentity(ctx)
 
 	if err != nil {
 		return nil, err
@@ -169,7 +169,7 @@ func loadConfig(ctx context.Context) aws.Config {
 	return cfg
 }
 
-func (id *cachedIdentity) getOrRefreshEncodedIdentity() (string, error) {
+func (id *cachedIdentity) getOrRefreshEncodedIdentity(ctx context.Context) (string, error) {
 
 	// Get system clock time before taking the lock
 	now := time.Now()
@@ -179,12 +179,12 @@ func (id *cachedIdentity) getOrRefreshEncodedIdentity() (string, error) {
 	defer id.mutex.Unlock()
 
 	if adj.After(id.instanceIdentity.Expiration) {
+		id.instanceIdentity.Description = *description.getDescription(ctx)
+		id.instanceIdentity.Expiration = now.Add(time.Minute * 15)
 
 		// This is expected to be the signicifantly less frequent path, as expiration window is
 		// expected to be on the order of minutes.  Thus the intentional choice to do the marshal
 		// and encode under lock, so that we can avoid these cycles in the common case.
-
-		id.instanceIdentity.Expiration = now.Add(time.Minute * 15)
 		j, err := json.Marshal(id.instanceIdentity)
 
 		if err != nil {
